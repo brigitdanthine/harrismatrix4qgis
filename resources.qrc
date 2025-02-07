@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/HarrisMatrix4QGIS" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
