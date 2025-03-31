@@ -25,7 +25,7 @@ from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 from qgis.gui import QgsMapLayerComboBox
-from qgis.core import QgsMapLayerProxyModel
+from qgis.core import QgsMapLayerProxyModel, QgsSingleSymbolRenderer, QgsMapLayerStyle
 from qgis.utils import iface
 # Initialize Qt resources from file resources.py
 from .resources import *
@@ -43,8 +43,7 @@ from qgis.core import QgsProject, QgsMapLayer
 from networkx.drawing.nx_pydot import graphviz_layout
 import numpy as np
 from qgis.core import QgsRuleBasedRenderer, QgsSymbol
-import qgis._3d
-from qgis._3d import QgsPolygon3DSymbol, QgsPhongMaterialSettings, QgsRuleBased3DRenderer
+from qgis._3d import QgsPolygon3DSymbol, QgsPhongMaterialSettings, QgsRuleBased3DRenderer, QgsPoint3DSymbol, QgsLine3DSymbol
 from qgis.PyQt.QtGui import QColor
 import re
 
@@ -258,6 +257,17 @@ class HarrisMatrix4QGIS:
             exp = "\"{}\" LIKE '%{}%'".format(select_attribute, node_name)
             print("Ausdruck für Attributabfrage:", exp)
             layer.selectByExpression(exp)
+            
+            # Prüfen ob der Layerstil "HarrisMatrix" existiert oder angelegt werden soll
+            style_name = "HarrisMatrix"
+            if style_name in layer.styleManager().styles():
+                layer.styleManager().setCurrentStyle(style_name)
+            else:
+                print(f"Stil '{style_name}' nicht gefunden")
+                style = layer.styleManager().currentStyle()
+                style_config = layer.styleManager().style(style)
+                layer.styleManager().addStyle(style_name, style_config)
+                layer.styleManager().setCurrentStyle(style_name)
         
             # 2D-Symbolisierung aktualisieren (wie bisher)
             renderer_2d = QgsRuleBasedRenderer(QgsSymbol.defaultSymbol(layer.geometryType()))
@@ -272,7 +282,7 @@ class HarrisMatrix4QGIS:
         
             # 3D-Symbolisierung aktualisieren
             if layer.geometryType() == 0:  # Punkte
-                symbol_3d = QgsSimple3DMarkerSymbolLayer()
+                symbol_3d = QgsPoint3DSymbol()
                 material = QgsPhongMaterialSettings()
                 rulebase = QgsRuleBased3DRenderer.Rule(symbol_3d)
                 rulebase.setActive(False)
@@ -280,7 +290,7 @@ class HarrisMatrix4QGIS:
                 root_rule = renderer.rootRule()
                 
             elif layer.geometryType() == 1:  # Linien
-                symbol_3d = QgsSimple3DLineSymbolLayer()
+                symbol_3d = QgsLine3DSymbol()
                 material = QgsPhongMaterialSettings()
                 rulebase = QgsRuleBased3DRenderer.Rule(symbol_3d)
                 rulebase.setActive(False)
@@ -301,8 +311,6 @@ class HarrisMatrix4QGIS:
             def rule_based_style(layer, material, symbol_3d, renderer, label, expression, color):
                 material.setAmbient(QColor(color))
                 symbol_3d.setMaterialSettings(material)
-                symbol_3d.setEdgesEnabled(True)
-                
                 
                 rule = root_rule.clone()
                 rule.setDescription(label)
