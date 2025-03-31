@@ -9,7 +9,7 @@
         begin                : 2024-04-15
         git sha              : $Format:%H$
         copyright            : (C) 2024 by Brigit Danthine
-        email                : brigitte.danthine@oeaw.ac.at
+        email                : brigit.danthine@oeaw.ac.at
  ***************************************************************************/
 
 /***************************************************************************
@@ -26,6 +26,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
+from qgis.utils import iface
 # Initialize Qt resources from file resources.py
 from .resources import *
 
@@ -41,7 +42,11 @@ from qgis.core import QgsProject
 from qgis.core import QgsProject, QgsMapLayer
 from networkx.drawing.nx_pydot import graphviz_layout
 import numpy as np
-from qgis.core import QgsRuleBasedRenderer, QgsSymbol, QgsProperty, QgsSymbolLayer
+from qgis.core import QgsRuleBasedRenderer, QgsSymbol
+import qgis._3d
+from qgis._3d import QgsPolygon3DSymbol, QgsPhongMaterialSettings, QgsRuleBased3DRenderer
+from qgis.PyQt.QtGui import QColor
+import re
 
 
 class HarrisMatrix4QGIS:
@@ -165,6 +170,7 @@ class HarrisMatrix4QGIS:
 
         if add_to_toolbar:
             self.toolbar.addAction(action)
+            self.iface.addToolBarIcon(action)
 
         if add_to_menu:
             self.iface.addPluginToMenu(
@@ -179,7 +185,7 @@ class HarrisMatrix4QGIS:
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
 
-        icon_path = ':/plugins/HarrisMatrix4QGIS/icon.png'
+        icon_path = ':/plugins/harrismatrix4qgis-main/icon.png'
         self.add_action(
             icon_path,
             text=self.tr(u'HarrisMatrix4QGIS'),
@@ -219,97 +225,197 @@ class HarrisMatrix4QGIS:
         del self.toolbar
 
     def render_graph(self):
-        def on_node_click(event, pos, labels):
+        def on_node_click(event, pos, node_attributes):
             if event.inaxes is not None:
                 x, y = event.xdata, event.ydata
-                for node, node_pos in pos.items():
-                    nx, ny = node_pos
-                    #print("nx: ", nx, "ny: ", ny)
-                    if (nx - x)**2 + (ny - y)**2 <= 200:  # 0.01 ist die Toleranz für den Klick
-                        print("Knoten geklickt:", labels[node])
-                        selected_node = labels[node]  # Den Namen des geklickten Knotens speichern
-                        select_feature_by_node_name(selected_node)  # Funktion aufrufen, um die Geometrie auszuwählen
-                        break
-        
+                for node, attrs in node_attributes.items():
+                    nx, ny = attrs["pos"]
+                    if (nx - x)**2 + (ny - y)**2 <= 200:  # Klick-Toleranz
+                        print("Knoten geklickt:", attrs["label"])
+                        selected_node = attrs["label"]
+                        selected_SE_number = ""
+    
+                        if self.dockwidget.trennzeichen_1.isChecked() or self.dockwidget.trennzeichen_2.isChecked():
+                            trennzeichen_1 = "-" if self.dockwidget.trennzeichen_1.isChecked() else ""
+                            trennzeichen_2 = "_" if self.dockwidget.trennzeichen_2.isChecked() else ""
+                            trennzeichen_gesamt = f"[{re.escape(trennzeichen_1)}{re.escape(trennzeichen_2)}]"
+    
+                            split_selected_node = re.split(trennzeichen_gesamt, selected_node)
+                            selected_SE_number = split_selected_node[-1]
+                        
+                        if len(selected_SE_number) > 0:
+                            selected_value = selected_SE_number
+                        else:
+                            selected_value = selected_node
+                        
+                        select_feature_by_node_name(selected_value)  # Auswahl-Funktion aufrufen
+                        break  
+                            
         def select_feature_by_node_name(node_name):
             layer = self.dockwidget.eingabelayer.currentLayer()
             layer.removeSelection()
             select_attribute = self.dockwidget.eingabefeld.currentField()
-            exp = "\"{}\" = '{}'".format(select_attribute, node_name)
+            exp = "\"{}\" LIKE '%{}%'".format(select_attribute, node_name)
+            print("Ausdruck für Attributabfrage:", exp)
             layer.selectByExpression(exp)
-            # Ändere die Symbolisierung auf "Rule Based"
-            renderer = QgsRuleBasedRenderer(QgsSymbol.defaultSymbol(layer.geometryType()))
-            root_rule = renderer.rootRule()
-            
-            # Regel für die Auswahl mit dem Wert 1
-            selection_rule = QgsRuleBasedRenderer.Rule(symbol = QgsSymbol.defaultSymbol(layer.geometryType()))
-            selection_rule.setFilterExpression(exp)
-            selection_rule.setLabel("Selection")
-                      
-            root_rule.appendChild(selection_rule)
-            #root_rule.appendChild(other_rule)
-            
-            layer.setRenderer(renderer)
-            
-            layer.triggerRepaint()
-            return
         
-        project = QgsProject.instance()
-        su_layer = self.dockwidget.eingabelayer.currentLayer()
+            # 2D-Symbolisierung aktualisieren (wie bisher)
+            renderer_2d = QgsRuleBasedRenderer(QgsSymbol.defaultSymbol(layer.geometryType()))
+            root_rule_2d = renderer_2d.rootRule()
         
-        graph_to_load = self.dockwidget.input_graphml.filePath()
-        #print(graph_to_load)
+            selection_rule_2d = QgsRuleBasedRenderer.Rule(symbol=QgsSymbol.defaultSymbol(layer.geometryType()))
+            selection_rule_2d.setFilterExpression(exp)
+            selection_rule_2d.setLabel("Selection")
         
-        # Lese die GraphML-Datei ein
-        tree = ET.parse(graph_to_load)
-        root = tree.getroot()
+            root_rule_2d.appendChild(selection_rule_2d)
+            layer.setRenderer(renderer_2d)
         
-        # Erstelle einen leeren Graphen
-        G = nx.Graph()
-        
-        # Namespace-Präfixe für die Verwendung in XPath-Ausdrücken definieren
-        namespaces = {'y': 'http://www.yworks.com/xml/graphml'}
-        
-        # Iteriere über alle Knoten im XML
-        pos = {}
-        for node in root.findall('.//graphml:node', {'graphml': 'http://graphml.graphdrawing.org/xmlns'}):
-            node_id = node.attrib['id']
-            label = None
-            color = None
-            
-            
-            # Extrahiere Label, Farbe und Position aus den XML-Tags
-            for data in node.findall('.//y:NodeLabel', namespaces):
-                label = data.text
-            
-            for data in node.findall('.//y:Fill', namespaces):
-                color = data.attrib['color']
-            
-            for data in node.findall('.//y:Geometry', namespaces):
-                pos_tuple = (int(float(data.attrib['x'])), int(float(data.attrib['y'])))
-            pos[node_id] = pos_tuple
-               
-            # Füge den Knoten mit Label, Farbe und Position zum Graphen hinzu
-            G.add_node(node_id, label=label, color=color, pos=pos)
-        
-        # Iteriere über alle Kanten im XML
-        for edge in root.findall('.//graphml:edge', {'graphml': 'http://graphml.graphdrawing.org/xmlns'}):
-            source_id = edge.attrib['source']
-            target_id = edge.attrib['target']
-            
-            # Füge die Kante zum Graphen hinzu
-            G.add_edge(source_id, target_id)
-            
-        
-        # Zeichne den Graphen
-        plt.figure(figsize=(10, 6))
-        colors = nx.get_node_attributes(G, 'color').values()
-        labels = nx.get_node_attributes(G, 'label')
-        nx.draw(G, pos, with_labels=True, labels=labels, node_color=colors, node_size=600, font_size=5, font_color='black')
-        pos_array = {node_id: np.array(coords) for node_id, coords in pos.items()}
-        plt.gcf().canvas.mpl_connect('button_press_event', lambda event: on_node_click(event, pos_array, labels))
-        plt.show()
+            # 3D-Symbolisierung aktualisieren
+            if layer.geometryType() == 0:  # Punkte
+                symbol_3d = QgsSimple3DMarkerSymbolLayer()
+                material = QgsPhongMaterialSettings()
+                rulebase = QgsRuleBased3DRenderer.Rule(symbol_3d)
+                rulebase.setActive(False)
+                renderer = QgsRuleBased3DRenderer(rulebase)
+                root_rule = renderer.rootRule()
+                
+            elif layer.geometryType() == 1:  # Linien
+                symbol_3d = QgsSimple3DLineSymbolLayer()
+                material = QgsPhongMaterialSettings()
+                rulebase = QgsRuleBased3DRenderer.Rule(symbol_3d)
+                rulebase.setActive(False)
+                renderer = QgsRuleBased3DRenderer(rulebase)
+                root_rule = renderer.rootRule()
 
+            elif layer.geometryType() == 2:  # Polygone
+                symbol_3d = QgsPolygon3DSymbol()
+                material = QgsPhongMaterialSettings()
+                rulebase = QgsRuleBased3DRenderer.Rule(symbol_3d)
+                rulebase.setActive(False)
+                renderer = QgsRuleBased3DRenderer(rulebase)
+                root_rule = renderer.rootRule()
+
+            else:
+                return  # Geometrietyp wird nicht unterstützt
+        
+            def rule_based_style(layer, material, symbol_3d, renderer, label, expression, color):
+                material.setAmbient(QColor(color))
+                symbol_3d.setMaterialSettings(material)
+                symbol_3d.setEdgesEnabled(True)
+                
+                
+                rule = root_rule.clone()
+                rule.setDescription(label)
+                rule.setFilterExpression(expression)
+                
+                root_rule.appendChild(rule)
+                rule.setActive(True)
+                for child in rule.children():
+                    rule.removeChildAt(0)
+                layer.setRenderer3D(renderer)
+                layer.triggerRepaint()
+                iface.layerTreeView().refreshLayerSymbology(layer.id())
+        
+            rule_based_style(layer, material, symbol_3d, renderer, 'Selection', exp, 'red')
+            rule_based_style(layer, material, symbol_3d, renderer, 'Anderes', '','black')
+            
+        #project = QgsProject.instance()
+        #su_layer = self.dockwidget.eingabelayer.currentLayer()
+        
+        def plot_graph_from_graphml(graph_to_load):
+            tree = ET.parse(graph_to_load)
+            root = tree.getroot()
+    
+            namespace = "{http://graphml.graphdrawing.org/xmlns}"
+            y_namespace = "{http://www.yworks.com/xml/graphml}"
+    
+            node_attributes = {}
+            for node in root.findall(f".//{namespace}node"):
+                node_id = node.get("id")
+                graphics = node.find(f".//{y_namespace}ShapeNode")
+                label_node = node.find(f".//{y_namespace}NodeLabel")
+                label = label_node.text if label_node is not None else node_id
+    
+                if graphics is not None:
+                    shape = graphics.find(f".//{y_namespace}Shape")
+                    fill = graphics.find(f".//{y_namespace}Fill")
+                    border = graphics.find(f".//{y_namespace}BorderStyle")
+                    geometry = graphics.find(f".//{y_namespace}Geometry")
+    
+                    shape_type = shape.get("type", "ellipse") if shape is not None else "ellipse"
+                    fill_color = fill.get("color", "lightblue") if fill is not None else "lightblue"
+                    border_color = border.get("color", "black") if border is not None else "black"
+                    x = float(geometry.get("x", 0)) if geometry is not None else 0
+                    y = float(geometry.get("y", 0)) if geometry is not None else 0
+                    width = float(geometry.get("width", 30)) if geometry is not None else 30
+                    height = float(geometry.get("height", 30)) if geometry is not None else 30
+    
+                    node_attributes[node_id] = {
+                        "shape": shape_type,
+                        "fill": fill_color,
+                        "border": border_color,
+                        "pos": (x + width / 2, -(y + height / 2)),  # Mittelpunkt statt obere Ecke
+                        "label": label,
+                        "width": width,
+                        "height": height
+                    }
+            return node_attributes
+    
+        def get_edge_paths(graphml_path):
+            tree = ET.parse(graphml_path)
+            root = tree.getroot()
+            namespace = "{http://graphml.graphdrawing.org/xmlns}"
+            y_namespace = "{http://www.yworks.com/xml/graphml}"
+    
+            edge_paths = {}
+            for edge in root.findall(f".//{namespace}edge"):
+                source = edge.get("source")
+                target = edge.get("target")
+                path = []
+                polyline = edge.find(f".//{y_namespace}PolyLineEdge/{y_namespace}Path")
+                if polyline is not None:
+                    for point in polyline.findall(f".//{y_namespace}Point"):
+                        x = float(point.get("x", 0))
+                        y = float(point.get("y", 0))
+                        path.append((x, -y))  # y-Achse invertieren für matplotlib
+                edge_paths[(source, target)] = path
+            return edge_paths
+    
+        def draw_graph(graph, node_attributes, edge_paths):
+            plt.figure(figsize=(10, 8))
+    
+            for node, attrs in node_attributes.items():
+                x, y = attrs["pos"]
+                if attrs["shape"] == "rectangle":
+                    plt.gca().add_patch(plt.Rectangle((x - attrs["width"]/2, y - attrs["height"]/2),
+                                                    attrs["width"], attrs["height"],
+                                                    facecolor=attrs["fill"], edgecolor=attrs["border"], zorder=3))
+                else:
+                    plt.scatter(x, y, s=700, c=attrs["fill"], edgecolors=attrs["border"], zorder=3)
+                plt.text(x, y, attrs["label"], fontsize=8, ha='center', va='center', zorder=4)
+    
+            for (src, tgt), path in edge_paths.items():
+                if src in node_attributes and tgt in node_attributes:
+                    x_vals = [node_attributes[src]["pos"][0]] + [p[0] for p in path] + [node_attributes[tgt]["pos"][0]]
+                    y_vals = [node_attributes[src]["pos"][1]] + [p[1] for p in path] + [node_attributes[tgt]["pos"][1]]
+    
+                    plt.plot(x_vals, y_vals, color='gray', linestyle='-', linewidth=1, zorder=2)
+                    if len(x_vals) > 1 and len(y_vals) > 1:
+                        plt.arrow(x_vals[-2], y_vals[-2], x_vals[-1] - x_vals[-2], y_vals[-1] - y_vals[-2],
+                                head_width=5, head_length=10, fc='gray', ec='gray', length_includes_head=True, zorder=3)
+    
+            plt.axis('off')
+            plt.show()
+    
+        graph_to_load = self.dockwidget.input_graphml.filePath()
+        node_attributes = plot_graph_from_graphml(graph_to_load)
+        edge_paths = get_edge_paths(graph_to_load)
+        draw_graph(nx.Graph(), node_attributes, edge_paths)
+    
+        pos_array = {node_id: np.array(attrs["pos"]) for node_id, attrs in node_attributes.items()}
+        plt.gcf().canvas.mpl_connect('button_press_event', lambda event: on_node_click(event, pos_array, node_attributes))
+    
+    
     #--------------------------------------------------------------------------
 
     def run(self):
